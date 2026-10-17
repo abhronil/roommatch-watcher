@@ -2,8 +2,9 @@
 """
 Roommatch watcher
 -----------------
-Checks Roommatch for new listings in Den Haag that have NO "voorrang"
-(priority) rule and sends a push notification to your phone.
+Sends a push notification to your phone for new Roommatch listings that are
+  1. in Den Haag and have NO "voorrang" (priority) rule, or
+  2. a "Direct offer" in Delft, Leiden or Den Haag (and have no priority rule).
 
 No login needed: Roommatch's listing feed is public. You only log in
 yourself (via ROOM.nl) when you want to react to a listing.
@@ -32,8 +33,16 @@ from pathlib import Path
 # (or set them as environment variables with the same name)
 # ============================================================
 
-# Cities to watch (as Roommatch writes them, case-insensitive)
+# Cities to watch for listings without voorrang (as Roommatch writes them, case-insensitive)
 CITIES = os.getenv("CITIES", "Den Haag").split(",")
+
+# Cities to watch for "Direct offer" listings. These are reported even when they
+# have a note like "Deze kamer is tijdelijk beschikbaar t/m ...", but still skipped
+# when they have a real priority rule. Set to "" to turn this off.
+DIRECT_OFFER_CITIES = [c for c in os.getenv("DIRECT_OFFER_CITIES", "Delft,Leiden,Den Haag").split(",") if c.strip()]
+
+# Roommatch's internal name for the "Direct offer" model
+DIRECT_OFFER_MODELS = {"reactiedatum"}
 
 # Priority rules are read from each listing's detail data (the "Eerste keus voor"
 # section, e.g. "De voorrangsregeling voor eerstejaars studenten is van toepassing").
@@ -120,9 +129,30 @@ RULE_NAMES = {
 }
 
 
-def in_cities(listing):
+MODEL_NAMES = {
+    "reactiedatum": "Direct offer",
+    "inschrijfduur": "Inschrijfduur",
+    "hospiteren": "Hospiteren",
+    "hospitereninschrijfduur": "Hospiteren (inschrijfduur)",
+}
+
+
+def model_code(listing):
+    return (((listing.get("model") or {}).get("modelCategorie") or {}).get("code") or "").strip()
+
+
+def is_direct_offer(listing):
+    return model_code(listing) in DIRECT_OFFER_MODELS
+
+
+def listing_kind(listing):
+    """'direct' for a direct offer we watch, 'regular' for a watched city, else None."""
     city = ((listing.get("city") or {}).get("name") or "").strip().lower()
-    return city in [c.strip().lower() for c in CITIES]
+    if is_direct_offer(listing) and city in [c.strip().lower() for c in DIRECT_OFFER_CITIES]:
+        return "direct"
+    if city in [c.strip().lower() for c in CITIES]:
+        return "regular"
+    return None
 
 
 def passes_extra_filters(listing):
@@ -135,12 +165,13 @@ def passes_extra_filters(listing):
     return True
 
 
-def info_reasons(listing):
+def info_reasons(listing, strict=None):
     """Priority mentioned in the short info line shown on the listing card."""
+    strict = STRICT if strict is None else strict
     info = (listing.get("infoveldKort") or "").strip()
     if not info:
         return []
-    if STRICT or any(w.strip().lower() in info.lower() for w in VOORRANG_WORDS if w.strip()):
+    if strict or any(w.strip().lower() in info.lower() for w in VOORRANG_WORDS if w.strip()):
         return [info]
     return []
 
@@ -165,7 +196,7 @@ def fetch_detail(listing_id):
     return result
 
 
-def detail_reasons(d):
+def detail_reasons(d, strict=None):
     """Every priority rule the detail page would list under 'Eerste keus voor'."""
     reasons = []
     for rule in d.get("sorteringBeleidsregels") or []:
@@ -183,13 +214,16 @@ def detail_reasons(d):
         reasons.append("Voorrang kernbinding")
     if d.get("voorrangAlleUrgenties"):
         reasons.append("Voorrang urgentie")
-    reasons += info_reasons(d)
+    reasons += info_reasons(d, strict)
     return reasons
 
 
-def priority_reasons(listing):
-    """[] means: no priority at all. Raises if the detail data can't be fetched."""
-    return info_reasons(listing) or detail_reasons(fetch_detail(listing.get("id")))
+def priority_reasons(listing, kind="regular"):
+    """[] means: no priority at all. Raises if the detail data can't be fetched.
+    For direct offers the info line only counts when it mentions priority words,
+    because it's usually just "tijdelijk beschikbaar t/m ..."."""
+    strict = False if kind == "direct" else None
+    return info_reasons(listing, strict) or detail_reasons(fetch_detail(listing.get("id")), strict)
 
 
 def describe(listing):
@@ -201,16 +235,23 @@ def describe(listing):
     rent = listing.get("totalRent") or 0
     area = listing.get("areaDwelling") or 0
     kind = (listing.get("woningsoort") or {}).get("localizedNaam", "")
-    model = ((listing.get("model") or {}).get("modelCategorie") or {}).get("code", "")
+    code = model_code(listing)
+    model = MODEL_NAMES.get(code, code)
     closing = listing.get("closingDate", "")
+    available = (listing.get("availableFrom") or listing.get("availableFromDate") or "").strip()
+    note = (listing.get("infoveldKort") or "").strip()
     url = DETAIL_URL.format(urlKey=listing.get("urlKey", ""))
 
     title = f"{addr.strip()}, {city} - EUR {rent:.0f}"
+    if is_direct_offer(listing):
+        title = "Direct offer: " + title
     lines = [
         f"{quarter}" if quarter else "",
         f"{kind}, {area} m2" if area else kind,
         f"Total rent: EUR {rent:.2f}",
         f"Type: {model}" if model else "",
+        f"Available: {available}" if available else "",
+        note,
         f"Closes: {closing}" if closing else "",
     ]
     body = "\n".join(l for l in lines if l)
@@ -272,7 +313,7 @@ def notify(title, body, url):
 
 def check_once(dry_run=False):
     listings = fetch_listings()
-    candidates = [l for l in listings if in_cities(l) and passes_extra_filters(l)]
+    candidates = [l for l in listings if listing_kind(l) and passes_extra_filters(l)]
     notified, rejected = load_state()
     now = time.time()
 
@@ -292,7 +333,7 @@ def check_once(dry_run=False):
         if i:
             time.sleep(1)  # be polite: one detail request per second
         try:
-            reasons = priority_reasons(l)
+            reasons = priority_reasons(l, listing_kind(l))
         except Exception as e:
             log(f"Could not check {title} ({e}); will try again next run")
             continue
@@ -314,8 +355,9 @@ def check_once(dry_run=False):
         except Exception as e:  # keep going if one notification fails
             log(f"Notification failed: {e}")
 
-    log(f"{len(listings)} listings total, {len(candidates)} in {', '.join(CITIES)}, "
-        f"{len(to_check)} checked, {new_hits} new without priority")
+    log(f"{len(listings)} listings total, {len(candidates)} watched "
+        f"(no-voorrang: {', '.join(CITIES)}; direct offers: {', '.join(DIRECT_OFFER_CITIES) or 'off'}), "
+        f"{len(to_check)} checked, {new_hits} new to notify")
     if not dry_run:
         live = {str(l.get("id")) for l in listings}
         rejected = {k: v for k, v in rejected.items() if k in live}  # forget closed listings
@@ -323,7 +365,7 @@ def check_once(dry_run=False):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Roommatch Den Haag no-voorrang watcher")
+    p = argparse.ArgumentParser(description="Roommatch watcher: no-voorrang listings and direct offers")
     p.add_argument("--loop", action="store_true", help="keep running and check periodically")
     p.add_argument("--dry-run", action="store_true", help="show matches, don't notify")
     p.add_argument("--test", action="store_true", help="send a test notification")

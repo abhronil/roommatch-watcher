@@ -1,6 +1,9 @@
 # 🏠 Roommatch watcher
 
-Sends a push notification to my phone when a new room or studio in **Den Haag** appears on [Roommatch](https://www.roommatch.nl/aanbod/studentenwoningen) **without any voorrang (priority) rule**.
+Sends a push notification to my phone when a new listing appears on [Roommatch](https://www.roommatch.nl/aanbod/studentenwoningen) that is either:
+
+- a room or studio in **Den Haag** **without any voorrang (priority) rule**, or
+- a **Direct offer** in **Delft, Leiden or Den Haag** (also without a priority rule).
 
 It runs for free on GitHub Actions every 10 minutes, so no computer has to stay on. It only *watches*: reacting to a listing is still done by hand on Roommatch.
 
@@ -11,7 +14,7 @@ It runs for free on GitHub Actions every 10 minutes, so no computer has to stay 
 ```mermaid
 flowchart TD
     A[⏰ Every 10 minutes<br/>GitHub Actions starts] --> B[Download the public<br/>Roommatch listings overview]
-    B --> C{In Den Haag?}
+    B --> C{Den Haag listing, or a Direct offer<br/>in Delft, Leiden or Den Haag?}
     C -- no --> X[Ignore]
     C -- yes --> D{Already checked<br/>before?}
     D -- yes --> X
@@ -23,8 +26,8 @@ flowchart TD
     H --> I
 ```
 
-1. **Overview.** The script downloads Roommatch's public list of all current listings and keeps the ones in Den Haag.
-2. **Details.** For every Den Haag listing it hasn't checked yet, it reads that listing's detail data: the same information the detail page shows, no login needed.
+1. **Overview.** The script downloads Roommatch's public list of all current listings and keeps the ones it watches: everything in Den Haag, plus Direct offers in Delft, Leiden and Den Haag.
+2. **Details.** For every watched listing it hasn't checked yet, it reads that listing's detail data: the same information the detail page shows, no login needed.
 3. **Filter.** If the listing has *any* priority rule, it is skipped (see the table below).
 4. **Notify.** Listings with no priority at all are sent to my phone with the address, rent, size, closing date and a link.
 5. **Remember.** It saves which listings it has handled in `roommatch_seen.json` and commits that file back to this repository, so I never get the same listing twice.
@@ -46,6 +49,8 @@ A listing is skipped if **any** of these apply:
 | Priority for urgentie | `voorrangAlleUrgenties` |
 | A priority group | `sorteergroep` |
 | Any short info line, e.g. "Voorrang voor Sloop & Renovatieurgentie" or "Eerstejaars masterstudent gezocht" | `infoveldKort` |
+
+> **Direct offers** (shown as "Direct offer" on Roommatch, model `reactiedatum` in the data) often have a note like "Deze kamer is tijdelijk beschikbaar t/m 31-01-27". For direct offers, that kind of note does **not** count as priority; only info lines that mention priority words (voorrang, urgentie, eerstejaars, ...) and the rules above do. The notification starts with **"Direct offer:"** and includes the availability and the note.
 
 > **Why the detail data?** The first-year rule doesn't appear in the overview at all, only on each listing's detail page. That's why every Den Haag listing is looked up individually.
 
@@ -79,11 +84,12 @@ The script reads optional settings from environment variables. To use them, add 
 
 | Setting | Default | What it does |
 |---|---|---|
-| `CITIES` | `Den Haag` | Cities to watch, comma-separated, e.g. `Den Haag,Delft` |
+| `CITIES` | `Den Haag` | Cities to watch for listings without voorrang, comma-separated, e.g. `Den Haag,Delft` |
+| `DIRECT_OFFER_CITIES` | `Delft,Leiden,Den Haag` | Cities to watch for Direct offers. Set to `""` to turn this off |
 | `MAX_TOTAL_RENT` | `0` (off) | Ignore listings with a higher total rent |
 | `ONLY_ZELFSTANDIG` | `false` | `true` = only self-contained homes (own kitchen and bathroom) |
 | `SKIP_HOSPITEREN` | `false` | `true` = skip listings where current housemates pick the new tenant |
-| `STRICT` | `true` | `true` = skip every listing with a short info line. `false` = only skip info lines with priority words |
+| `STRICT` | `true` | `true` = skip every listing with a short info line (except Direct offers, see above). `false` = only skip info lines with priority words |
 | `RECHECK_HOURS` | `6` | How often skipped listings are checked again |
 
 **Changing how often it runs:** edit the `cron` line in `watch.yml`. The times are in UTC; GitHub won't run schedules more often than every 5 minutes.
@@ -92,12 +98,13 @@ The script reads optional settings from environment variables. To use them, add 
 
 - **See what it did:** open the **Actions** tab, click a run, then the **Check Roommatch** step. It lists every listing it checked and why it was skipped.
 - **Run a check now:** Actions → **Roommatch watcher** → **Run workflow**.
+- **Send a test notification:** Actions → **Roommatch watcher** → **Run workflow** → tick **Only send a test notification to my phone** → **Run workflow**.
 - **Pause it:** Actions → **Roommatch watcher** → **⋯** → **Disable workflow**. Use **Enable workflow** to turn it back on.
 
 ### Run it on your own computer
 
 ```bash
-python3 roommatch_watcher.py --dry-run   # show every Den Haag listing and why it's skipped
+python3 roommatch_watcher.py --dry-run   # show every watched listing and why it's skipped
 NTFY_TOPIC=your-topic python3 roommatch_watcher.py --test   # send a test notification
 NTFY_TOPIC=your-topic python3 roommatch_watcher.py --loop   # keep checking every 10 minutes
 ```
@@ -108,7 +115,7 @@ Only run one copy at a time (this repository *or* your computer), otherwise ever
 
 | Problem | What's going on |
 |---|---|
-| No notifications for a long time | Usually normal: almost every Den Haag listing has the first-year rule. Check the latest run log to see what was skipped. |
+| No notifications for a long time | Usually normal: almost every regular Den Haag listing has the first-year rule, and Direct offers don't appear every day. Check the latest run log to see what was skipped. |
 | Runs stopped completely | GitHub pauses schedules in public repositories after 60 days without activity. Go to Actions → **Enable workflow**. |
 | Checks are late | GitHub sometimes delays scheduled runs by 5–30 minutes when it's busy. |
 | Run fails with `403` | Roommatch is refusing requests from GitHub's servers. Run the script on your own computer or a small server instead. |
