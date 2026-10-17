@@ -50,9 +50,41 @@ A listing is skipped if **any** of these apply:
 | A priority group | `sorteergroep` |
 | Any short info line, e.g. "Voorrang voor Sloop & Renovatieurgentie" or "Eerstejaars masterstudent gezocht" | `infoveldKort` |
 
-> **Direct offers** (shown as "Direct offer" on Roommatch, model `reactiedatum` in the data) often have a note like "Deze kamer is tijdelijk beschikbaar t/m 31-01-27". For direct offers, that kind of note does **not** count as priority; only info lines that mention priority words (voorrang, urgentie, eerstejaars, ...) and the rules above do. The notification starts with **"Direct offer:"** and includes the availability and the note.
+> **Why the detail data?** The first-year rule doesn't appear in the overview at all, only on each listing's detail page. That's why every watched listing is looked up individually.
 
-> **Why the detail data?** The first-year rule doesn't appear in the overview at all, only on each listing's detail page. That's why every Den Haag listing is looked up individually.
+## Direct offers
+
+On Roommatch, a **Direct offer** is a listing where the order is decided by when you react, not by how long you've been registered: reacting early matters. They're often temporary rooms that are available *per direct*. Because speed matters, the watcher reports them separately.
+
+**What gets reported:** every new Direct offer in **Delft, Leiden or Den Haag** that has no priority rule.
+
+| | Regular listings | Direct offers |
+|---|---|---|
+| Cities | Den Haag | Delft, Leiden, Den Haag |
+| Order decided by | Inschrijfduur (how long you've been registered) | When you react |
+| A note like "Deze kamer is tijdelijk beschikbaar t/m 31-01-27" | Skipped | **Reported** |
+| A real priority rule (see the table above) | Skipped | Skipped |
+
+For direct offers, an info line only counts as priority when it mentions priority words such as voorrang, urgentie, eerstejaars or gezocht.
+
+**What the notification looks like:**
+
+```
+Direct offer: Lisztstraat 131 k1, Delft - EUR 543
+Buitenhof
+Onzelfstandig, 16 m2
+Total rent: EUR 542.82
+Type: Direct offer
+Available: Per direct
+Deze kamer is tijdelijk beschikbaar t/m 31-01-27
+Closes: 2026-10-21 16:42:00
+```
+
+Tapping it opens the listing on Roommatch.
+
+**In the data:** a Direct offer has model `reactiedatum`.
+
+**Change or turn off:** set `DIRECT_OFFER_CITIES` (see [Settings](#settings)), for example `"Delft"` for Delft only, or `""` to stop direct-offer notifications.
 
 ## Files
 
