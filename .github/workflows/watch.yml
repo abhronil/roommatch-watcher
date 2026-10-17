@@ -28,6 +28,7 @@ jobs:
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           TEST_RUN: ${{ inputs.test }}
+          TZ: Europe/Amsterdam              # times in Dutch time
         run: |
           if [ "$TEST_RUN" = "true" ]; then
             python3 roommatch_watcher.py --test
@@ -36,6 +37,7 @@ jobs:
           fi
 
       - name: Remember what was already checked
+        if: always()                      # also after a failed check, to count failures
         run: |
           if [ -n "$(git status --porcelain roommatch_seen.json)" ]; then
             git config user.name "github-actions[bot]"
