@@ -80,7 +80,7 @@ Deze kamer is tijdelijk beschikbaar t/m 31-01-27
 Closes: 2026-10-21 16:42:00
 ```
 
-Tapping it opens the listing on Roommatch.
+It comes with the room's photo and the **Reageer** and **Kaart** buttons (see [Notifications](#notifications)).
 
 **In the data:** a Direct offer has model `reactiedatum`.
 
@@ -91,8 +91,8 @@ Tapping it opens the listing on Roommatch.
 | File | What it is |
 |---|---|
 | `roommatch_watcher.py` | The script. Python standard library only, nothing to install. |
-| `.github/workflows/watch.yml` | The schedule: runs the script every 10 minutes and saves `roommatch_seen.json`. |
-| `roommatch_seen.json` | The script's memory: listings already notified, and skipped ones with the time they were checked. Written automatically. |
+| `.github/workflows/watch.yml` | The schedule: runs the script every 10 minutes and saves `roommatch_seen.json`, also after a failed run. |
+| `roommatch_seen.json` | The script's memory: listings already notified, skipped ones with the time they were checked, and health info (failed checks in a row, last successful check). Written automatically. |
 
 ## Notifications
 
@@ -101,6 +101,29 @@ Notifications go through [ntfy](https://ntfy.sh), a free push service. The ntfy 
 The topic name is stored as the repository secret **`NTFY_TOPIC`** (Settings → Secrets and variables → Actions), **not** in the code. Anyone who knows the topic could read the notifications, so it should stay out of this public repository.
 
 To change it: create a new topic in the ntfy app, then update the `NTFY_TOPIC` secret with the new name.
+
+Every listing notification includes:
+
+- **The room's photo**, the listing's first picture.
+- **Reageer**: opens the listing on Roommatch, where the Reageer button is. Reacting itself still takes one tap there, because Roommatch only accepts reactions from its own page while you're logged in.
+- **Kaart**: shows the location on Google Maps.
+- Tapping the notification itself also opens the listing.
+
+## Problem alerts
+
+The watcher warns me when something goes wrong, so a quiet phone never secretly means a broken watcher.
+
+| Situation | What I get |
+|---|---|
+| **3 checks in a row fail** (Roommatch unreachable or blocking, the site changed, an error) | ⚠️ "Roommatch watcher has a problem", with the error and the time of the last successful check. Repeated at most every 12 hours while it stays broken. |
+| **It works again** after an alert | ✅ "Roommatch watcher works again" |
+| **A run fails** | The run gets a red cross in the Actions tab, and GitHub sends me its usual failure email. |
+
+**Built-in safety:** if a listing's detail data no longer contains the priority information (for example because Roommatch changed its site), the listing is **not** sent. The watcher won't guess "no priority". It tries again on the next run, and if every listing fails, that counts as a failed check.
+
+**Staying active:** the memory file is updated at least once a day, so the repository always has recent activity. That stops GitHub from pausing the schedule after 60 quiet days.
+
+One thing it can't report: if GitHub doesn't start runs at all, there's no run to send an alert. In that case GitHub's own emails, or a look at the Actions tab, will show it.
 
 ## Settings
 
@@ -123,6 +146,8 @@ The script reads optional settings from environment variables. To use them, add 
 | `SKIP_HOSPITEREN` | `false` | `true` = skip listings where current housemates pick the new tenant |
 | `STRICT` | `true` | `true` = skip every listing with a short info line (except Direct offers, see above). `false` = only skip info lines with priority words |
 | `RECHECK_HOURS` | `6` | How often skipped listings are checked again |
+| `ALERT_AFTER_FAILURES` | `3` | Failed checks in a row before a problem alert |
+| `ALERT_REPEAT_HOURS` | `12` | How often the problem alert repeats while it stays broken |
 
 **Changing how often it runs:** edit the `cron` line in `watch.yml`. The times are in UTC; GitHub won't run schedules more often than every 5 minutes.
 
@@ -148,7 +173,8 @@ Only run one copy at a time (this repository *or* your computer), otherwise ever
 | Problem | What's going on |
 |---|---|
 | No notifications for a long time | Usually normal: almost every regular Den Haag listing has the first-year rule, and Direct offers don't appear every day. Check the latest run log to see what was skipped. |
-| Runs stopped completely | GitHub pauses schedules in public repositories after 60 days without activity. Go to Actions → **Enable workflow**. |
+| ⚠️ "Roommatch watcher has a problem" | Open the Actions tab and look at the latest red run. A `403` means Roommatch is blocking GitHub; anything else, check the error in the run log. |
+| Runs stopped completely | GitHub pauses schedules in public repositories after 60 days without activity (the daily memory update should prevent this). Go to Actions → **Enable workflow**. |
 | Checks are late | GitHub sometimes delays scheduled runs by 5–30 minutes when it's busy. |
 | Run fails with `403` | Roommatch is refusing requests from GitHub's servers. Run the script on your own computer or a small server instead. |
 | A notification still had voorrang | Roommatch may have added a new kind of rule. Open the listing, then check the run log for what the script saw. |

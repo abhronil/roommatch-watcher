@@ -67,6 +67,11 @@ SKIP_HOSPITEREN = os.getenv("SKIP_HOSPITEREN", "false").lower() == "true"
 # How often to check in --loop mode (please keep this >= 5 to be polite)
 CHECK_EVERY_MINUTES = int(os.getenv("CHECK_EVERY_MINUTES", "10"))
 
+# Problem alerts: warn me when this many checks in a row fail, and repeat the
+# warning at most every ALERT_REPEAT_HOURS while it stays broken.
+ALERT_AFTER_FAILURES = int(os.getenv("ALERT_AFTER_FAILURES", "3"))
+ALERT_REPEAT_HOURS = float(os.getenv("ALERT_REPEAT_HOURS", "12"))
+
 # --- Notifications -----------------------------------------
 # ntfy (easiest): install the free "ntfy" app on your phone, subscribe to
 # the topic below. Pick something long and random, anyone who knows the
@@ -85,6 +90,8 @@ DETAIL_URL = "https://www.roommatch.nl/aanbod/studentenwoningen/details/{urlKey}
 DETAIL_API = "https://www.roommatch.nl/portal/object/frontend/getobject/format/json"
 SEEN_FILE = Path(__file__).with_name("roommatch_seen.json")
 USER_AGENT = "Mozilla/5.0 (personal listing alert; checks every few minutes)"
+SITE = "https://www.roommatch.nl"
+PHOTO_SIZE = ".800f600"  # Roommatch serves resized photos: <photo url>.<width>f<height>
 
 # When run in the background (pythonw / Task Scheduler) there is no console,
 # so write the output to roommatch.log next to the script instead.
@@ -116,7 +123,10 @@ def fetch_listings():
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-    return data.get("result", [])
+    listings = data.get("result") if isinstance(data, dict) else None
+    if not isinstance(listings, list) or not listings:
+        raise ValueError("Roommatch returned no listings (the site may have changed)")
+    return listings
 
 
 # ---------- filtering ----------
@@ -180,19 +190,23 @@ def fetch_detail(listing_id):
     """Full listing data, the same data the listing's detail page shows (no login needed)."""
     detail_file = os.getenv("DETAIL_FILE")  # for testing: JSON {id: result}
     if detail_file:
-        return json.loads(Path(detail_file).read_text(encoding="utf-8"))[str(listing_id)]
-    req = urllib.request.Request(
-        DETAIL_API,
-        data=urllib.parse.urlencode({"id": listing_id}).encode(),
-        headers={"User-Agent": USER_AGENT, "Accept": "application/json",
-                 "Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    result = data.get("result")
+        result = json.loads(Path(detail_file).read_text(encoding="utf-8")).get(str(listing_id))
+    else:
+        req = urllib.request.Request(
+            DETAIL_API,
+            data=urllib.parse.urlencode({"id": listing_id}).encode(),
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json",
+                     "Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        result = data.get("result") if isinstance(data, dict) else None
     if not isinstance(result, dict) or not result.get("id"):
         raise ValueError("no listing data returned")
+    if "sorteringBeleidsregels" not in result:
+        # Without this field we can't tell whether there's priority, so don't guess
+        raise ValueError("priority information missing (the site may have changed)")
     return result
 
 
@@ -258,6 +272,18 @@ def describe(listing):
     return title, body, url
 
 
+def extras(listing, url):
+    """Photo and buttons for the notification."""
+    pictures = listing.get("pictures") or []
+    photo = SITE + pictures[0]["uri"] + PHOTO_SIZE if pictures and pictures[0].get("uri") else None
+    actions = [{"action": "view", "label": "Reageer", "url": url, "clear": True}]
+    lat, lng = listing.get("latitude"), listing.get("longitude")
+    if lat and lng:
+        actions.append({"action": "view", "label": "Kaart",
+                        "url": f"https://www.google.com/maps/search/?api=1&query={lat}%2C{lng}"})
+    return photo, actions
+
+
 # ---------- memory (so you only hear about each listing once) ----------
 # notified: listings you already got a notification for
 # rejected: listings skipped for priority, re-checked every RECHECK_HOURS in case
@@ -267,30 +293,40 @@ RECHECK_HOURS = float(os.getenv("RECHECK_HOURS", "6"))
 
 
 def load_state():
+    """notified (set), rejected ({id: time}), health ({...})"""
     try:
         data = json.loads(SEEN_FILE.read_text())
         if isinstance(data, dict):
-            return set(data.get("notified", [])), dict(data.get("rejected", {}))
+            return (set(data.get("notified", [])), dict(data.get("rejected", {})),
+                    dict(data.get("health", {})))
     except (FileNotFoundError, ValueError):
         pass
-    return set(), {}  # also resets the old format, whose entries all had priority
+    return set(), {}, {}  # also resets the old format, whose entries all had priority
 
 
-def save_state(notified, rejected):
-    SEEN_FILE.write_text(json.dumps({"notified": sorted(notified), "rejected": rejected}))
+def save_state(notified, rejected, health):
+    SEEN_FILE.write_text(json.dumps(
+        {"notified": sorted(notified), "rejected": rejected, "health": health}))
 
 
 # ---------- notifications ----------
 
-def notify(title, body, url):
+def notify(title, body, url, photo=None, actions=None, tags=("house",), priority=4):
     sent = False
     if NTFY_TOPIC:
-        params = urllib.parse.urlencode(
-            {"title": title, "click": url, "tags": "house", "priority": "high"}
-        )
+        msg = {"topic": NTFY_TOPIC, "title": title, "message": body,
+               "tags": list(tags), "priority": priority}
+        if url:
+            msg["click"] = url
+        if photo:
+            msg["attach"] = photo
+            msg["filename"] = "room.jpg"
+        if actions:
+            msg["actions"] = actions
         req = urllib.request.Request(
-            f"{NTFY_SERVER}/{NTFY_TOPIC}?{params}",
-            data=f"{body}\n{url}".encode("utf-8"),
+            NTFY_SERVER.rstrip("/") + "/",
+            data=json.dumps(msg).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
             method="POST",
         )
         urllib.request.urlopen(req, timeout=15).read()
@@ -306,15 +342,16 @@ def notify(title, body, url):
         sent = True
     if not sent:
         log("No notification channel set (NTFY_TOPIC or TELEGRAM_*), printing instead:")
-    log(f"NEW: {title}\n    {body.replace(chr(10), ' | ')}\n    {url}")
+    log(f"SENT: {title}\n    {body.replace(chr(10), ' | ')}\n    {url or ''}")
 
 
 # ---------- main ----------
 
-def check_once(dry_run=False):
+def check_once(notified, rejected, dry_run=False):
+    """One check. Raises if Roommatch can't be read at all.
+    Returns (number checked, number of failed detail lookups)."""
     listings = fetch_listings()
     candidates = [l for l in listings if listing_kind(l) and passes_extra_filters(l)]
-    notified, rejected = load_state()
     now = time.time()
 
     if dry_run:
@@ -326,7 +363,8 @@ def check_once(dry_run=False):
             and now - rejected.get(str(l.get("id")), 0) > RECHECK_HOURS * 3600
         ]
 
-    new_hits = 0
+    new_hits = errors = 0
+    last_error = None
     for i, l in enumerate(to_check):
         lid = str(l.get("id"))
         title, body, url = describe(l)
@@ -335,6 +373,8 @@ def check_once(dry_run=False):
         try:
             reasons = priority_reasons(l, listing_kind(l))
         except Exception as e:
+            errors += 1
+            last_error = e
             log(f"Could not check {title} ({e}); will try again next run")
             continue
 
@@ -348,11 +388,14 @@ def check_once(dry_run=False):
             log(f"Skipped (priority): {title} [{'; '.join(reasons)}]")
             continue
         try:
-            notify(title, body, url)
+            photo, actions = extras(l, url)
+            notify(title, body, url, photo, actions)
             notified.add(lid)
             rejected.pop(lid, None)
             new_hits += 1
         except Exception as e:  # keep going if one notification fails
+            errors += 1
+            last_error = e
             log(f"Notification failed: {e}")
 
     log(f"{len(listings)} listings total, {len(candidates)} watched "
@@ -360,8 +403,61 @@ def check_once(dry_run=False):
         f"{len(to_check)} checked, {new_hits} new to notify")
     if not dry_run:
         live = {str(l.get("id")) for l in listings}
-        rejected = {k: v for k, v in rejected.items() if k in live}  # forget closed listings
-        save_state(notified, rejected)
+        for k in [k for k in rejected if k not in live]:  # forget closed listings
+            del rejected[k]
+    if to_check and errors == len(to_check):
+        raise RuntimeError(f"every listing check failed, last error: {last_error}")
+    return len(to_check), errors
+
+
+def fmt_time(ts):
+    return datetime.fromtimestamp(ts).strftime("%a %d %b %H:%M") if ts else "unknown"
+
+
+def run_and_watch_health(dry_run=False):
+    """Runs one check and keeps track of failures. Returns True if it worked."""
+    notified, rejected, health = load_state()
+    now = time.time()
+    try:
+        check_once(notified, rejected, dry_run)
+        ok, error = True, None
+    except Exception as e:
+        ok, error = False, e
+        log(f"CHECK FAILED: {e}")
+    if dry_run:
+        return ok
+
+    if ok:
+        if health.get("alerted"):
+            try:
+                notify("Roommatch watcher works again",
+                       f"Checks are running normally again since {fmt_time(now)}. "
+                       f"It was down since {fmt_time(health.get('first_failure'))}.",
+                       None, tags=("white_check_mark",), priority=3)
+            except Exception as e:
+                log(f"Could not send recovery notice: {e}")
+        # last_ok_day changes once a day, so the memory file (and the repository)
+        # sees activity every day, which keeps GitHub's schedule from pausing
+        health = {"last_ok": now, "last_ok_day": datetime.now().strftime("%Y-%m-%d")}
+    else:
+        health["failures"] = health.get("failures", 0) + 1
+        health.setdefault("first_failure", now)
+        health["last_error"] = str(error)[:300]
+        repeat_due = now - health.get("last_alert", 0) > ALERT_REPEAT_HOURS * 3600
+        if health["failures"] >= ALERT_AFTER_FAILURES and repeat_due:
+            try:
+                notify("Roommatch watcher has a problem",
+                       f"The last {health['failures']} checks failed, so you might miss listings.\n"
+                       f"Error: {str(error)[:200]}\n"
+                       f"Last successful check: {fmt_time(health.get('last_ok'))}",
+                       "https://github.com/abhronil/roommatch-watcher/actions",
+                       tags=("warning",), priority=5)
+                health["alerted"] = True
+                health["last_alert"] = now
+            except Exception as e:
+                log(f"Could not send problem alert: {e}")
+    save_state(notified, rejected, health)
+    return ok
 
 
 def main():
@@ -372,20 +468,26 @@ def main():
     args = p.parse_args()
 
     if args.test:
-        notify("Roommatch watcher test", "If you see this, notifications work.",
-               "https://www.roommatch.nl/aanbod/studentenwoningen")
+        # Show what a real notification looks like, using a current listing
+        try:
+            sample = next(l for l in fetch_listings() if listing_kind(l))
+            title, body, url = describe(sample)
+            photo, actions = extras(sample, url)
+            notify("TEST - " + title, "This is how a match will look (just a test).\n" + body,
+                   url, photo, actions)
+        except Exception as e:
+            log(f"Could not build a sample listing ({e}), sending a plain test")
+            notify("Roommatch watcher test", "If you see this, notifications work.",
+                   "https://www.roommatch.nl/aanbod/studentenwoningen")
         return
 
     if not args.loop:
-        check_once(args.dry_run)
-        return
+        # exit code 1 marks the run as failed (red cross on GitHub) when it broke
+        sys.exit(0 if run_and_watch_health(args.dry_run) else 1)
 
     log(f"Watching every {CHECK_EVERY_MINUTES} min. Ctrl+C to stop.")
     while True:
-        try:
-            check_once(args.dry_run)
-        except Exception as e:
-            log(f"Check failed (will retry): {e}")
+        run_and_watch_health(args.dry_run)
         time.sleep(max(CHECK_EVERY_MINUTES, 5) * 60)
 
 
