@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "7,17,27,37,47,57 * * * *"   # every 10 minutes (UTC)
   workflow_dispatch:                      # adds a "Run workflow" button
+    inputs:
+      test:
+        description: "Only send a test notification to my phone"
+        type: boolean
+        default: false
 
 permissions:
   contents: write                         # lets it save roommatch_seen.json
@@ -22,7 +27,13 @@ jobs:
       - name: Check Roommatch
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-        run: python3 roommatch_watcher.py
+          TEST_RUN: ${{ inputs.test }}
+        run: |
+          if [ "$TEST_RUN" = "true" ]; then
+            python3 roommatch_watcher.py --test
+          else
+            python3 roommatch_watcher.py
+          fi
 
       - name: Remember what was already checked
         run: |
